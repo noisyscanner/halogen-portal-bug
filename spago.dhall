@@ -20,6 +20,7 @@ to generate this file without the comments in this block.
   , "foldable-traversable"
   , "free"
   , "halogen"
+  , "halogen-hooks"
   , "halogen-store"
   , "halogen-subscriptions"
   , "maybe"
@@ -27,6 +28,7 @@ to generate this file without the comments in this block.
   , "tailrec"
   , "transformers"
   , "typelevel-prelude"
+  , "unsafe-coerce"
   , "web-html"
   ]
 , packages = ./packages.dhall

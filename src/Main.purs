@@ -36,7 +36,11 @@ component = H.mkComponent
     H.modify_ \st -> st { open = not st.open }
 
   handleAction Increment = H.modify_ \st -> st { counter = st.counter + 1 }
-  handleAction Query = H.tell (Proxy @"child") unit BradsQuery
+  handleAction Query = do 
+  
+    res <- H.request (Proxy @"child") unit Q2
+
+    traceM {res}
 
   render { open, counter } = HH.div_
     [ HH.text $ "Modal is " <> (if open then "open" else "closed")
@@ -58,7 +62,7 @@ component = H.mkComponent
 type Input = { counter :: Int }
 
 data ActionInt act = Raise act | Receive Input
-data QueryInt a = BradsQuery a
+data QueryInt a = BradsQuery a | Q2 (Int -> a)
 
 child :: forall m. MonadAff m => H.Component QueryInt Input Action m
 child = H.mkComponent
@@ -82,8 +86,10 @@ child = H.mkComponent
   handleQuery :: forall a. QueryInt a -> H.HalogenM _ _ _ _ m (Maybe a)
   handleQuery = case _ of
     BradsQuery a -> do
-      traceM "Brad's query received"
       pure $ Just a
+
+    Q2 f -> do 
+      pure $ Just $ f 42
 
   render { counter } = HH.div_
     [ HH.text "I am the modal"

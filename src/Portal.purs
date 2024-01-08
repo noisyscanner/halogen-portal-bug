@@ -8,11 +8,11 @@ import Prelude
 
 import Control.Apply (lift2)
 import Control.Monad.Reader (ReaderT, asks, lift, runReaderT)
-import Data.Coyoneda (unCoyoneda)
+import Data.Coyoneda (hoistCoyoneda, unCoyoneda)
 import Data.Foldable (for_)
 import Data.Maybe (Maybe(..), maybe, maybe')
 import Data.Symbol (class IsSymbol)
-import Debug (spy, traceM)
+import Debug (traceM)
 import Effect.Aff (Aff)
 import Effect.Aff.Class (class MonadAff)
 import Halogen as H
@@ -186,7 +186,7 @@ portalReaderT
   -> H.ComponentHTML action slots (ReaderT r m)
 portalReaderT = portal ntReaderT
 
-data Query input query a = SetInput input a | Query2 (query a) a
+data Query input query a = SetInput input a | Query2 (query a)
 
 queryComp
   :: forall query input output m
@@ -195,14 +195,14 @@ queryComp
 queryComp = H.mkComponent
   { initialState
   , render
-  , eval: H.mkEval $ H.defaultEval { handleQuery = handleQuery }
+  , eval: H.mkEval $ H.defaultEval { handleQuery = handleQuery, handleAction = H.raise }
   }
 
   where
 
   initialState = identity
 
-  render { input, child } = HH.slot_ (Proxy @"content") unit child input
+  render { input, child } = HH.slot (Proxy @"content") unit child input identity
 
   handleQuery :: forall action a. Query input query a -> H.HalogenM _ action _ output m (Maybe a)
   handleQuery = case _ of
@@ -210,7 +210,9 @@ queryComp = H.mkComponent
       traceM { input }
       H.modify_ _ { input = input }
       pure $ Just a
-    Query2 qa a -> pure $ Just a
+    Query2 qa -> do
+      res <- H.query (Proxy @"content") unit qa
+      pure res
 
 component
   :: forall query input output m n
@@ -271,7 +273,11 @@ component contextualize =
       H.gets _.io
         >>= case _ of
           Nothing -> pure $ fail unit
-          Just io -> H.liftAff $ unCoyoneda (\k q -> maybe' fail k <$> ioq1 io q) query
+          Just io -> H.liftAff $ unCoyoneda (\k q -> maybe' fail k <$> ioq1 io q) (hoistCoyoneda toParentQuery query)
+
+      where 
+      toParentQuery :: forall x. query x -> Query input query x
+      toParentQuery q = Query2 q
 
   -- Just io -> do
   --   c <- H.liftAff $ (ioq1 io) (Query2 query (fail unit))
