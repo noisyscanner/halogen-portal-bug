@@ -8,23 +8,19 @@ import Prelude
 
 import Control.Apply (lift2)
 import Control.Monad.Reader (ReaderT, asks, lift, runReaderT)
-import Control.Monad.Rec.Class (forever)
-import Data.Coyoneda (unCoyoneda)
+import Data.Coyoneda (hoistCoyoneda, unCoyoneda)
 import Data.Foldable (for_)
 import Data.Maybe (Maybe(..), maybe, maybe')
 import Data.Symbol (class IsSymbol)
-import Debug (spy, traceM)
-import Effect.Aff (Aff, launchAff)
-import Effect.Aff.AVar as AVar
+import Debug (traceM)
+import Effect.Aff (Aff)
 import Effect.Aff.Class (class MonadAff)
-import Effect.Class (liftEffect)
-import Effect.Class.Console (log)
 import Halogen as H
 import Halogen.Aff (awaitBody)
 import Halogen.HTML as HH
 import Halogen.Store.Monad (StoreT(..))
-import Halogen.Subscription as HS
 import Halogen.VDom.Driver as VDom
+import Type.Prelude (Proxy(..))
 import Type.Proxy (Proxy)
 import Type.Row as Row
 import Web.HTML (HTMLElement)
@@ -38,7 +34,7 @@ type InputFields query input output n =
 type Input query input output n = { | InputFields query input output n }
 
 type State query input output n =
-  { io :: Maybe (H.HalogenIO query output Aff)
+  { io :: Maybe (H.HalogenIO (Query input query) output Aff)
   | InputFields query input output n
   }
 
@@ -141,6 +137,7 @@ portal
   => IsSymbol label
   => Ord slot
   => MonadAff m
+  => MonadAff n -- FIXME?????
   => m (NT n Aff)
   -> Proxy label
   -> slot
@@ -189,9 +186,38 @@ portalReaderT
   -> H.ComponentHTML action slots (ReaderT r m)
 portalReaderT = portal ntReaderT
 
+data Query input query a = SetInput input a | Query2 (query a)
+
+queryComp
+  :: forall query input output m
+   . MonadAff m
+  => H.Component (Query input query) (State query input output m) output m
+queryComp = H.mkComponent
+  { initialState
+  , render
+  , eval: H.mkEval $ H.defaultEval { handleQuery = handleQuery, handleAction = H.raise }
+  }
+
+  where
+
+  initialState = identity
+
+  render { input, child } = HH.slot (Proxy @"content") unit child input identity
+
+  handleQuery :: forall action a. Query input query a -> H.HalogenM _ action _ output m (Maybe a)
+  handleQuery = case _ of
+    SetInput input a -> do
+      traceM { input }
+      H.modify_ _ { input = input }
+      pure $ Just a
+    Query2 qa -> do
+      res <- H.query (Proxy @"content") unit qa
+      pure res
+
 component
   :: forall query input output m n
    . MonadAff m
+  => MonadAff n
   => m (NT n Aff)
   -> H.Component query (Input query input output n) output m
 component contextualize =
@@ -216,40 +242,46 @@ component contextualize =
     H.Initialize a -> do
       NT context <- H.lift contextualize
       state <- H.get
-      -- Create a blocking mutable variable which will be updated with messages
-      -- as they come in.
-      var <- H.liftAff AVar.empty
       -- The target element can either be the one supplied by the user, or the
       -- document body. Either way, we'll run the sub-tree at the target and
       -- save the resulting interface.
       target <- maybe (H.liftAff awaitBody) pure state.targetElement
-      io <- H.liftAff $ VDom.runUI (H.hoist context state.child) state.input target
-      -- Subscribe to the child component's messages, writing them to the
-      -- variable. Multiple writes without a take will queue messages.
-      _ <- liftEffect $ HS.subscribe io.messages \msg -> launchAff $ AVar.put (spy "action" msg) var
-      _ <-
-        H.fork
-          $ forever do
-              msg <- H.liftAff (AVar.take var)
-              eval (H.Action msg unit)
+      io <- H.liftAff $ VDom.runUI (H.hoist context queryComp) state target
+      -- Subscribe to the child component's messages
+      _ <- H.subscribe io.messages
       H.modify_ _ { io = Just io }
       pure a
     H.Finalize a -> do
-      liftEffect $ log "Finalising portal"
-      state <- H.get -- FIXME not binding
-      traceM state -- this is never logged
+      state <- H.get
       for_ state.io (H.liftAff <<< _.dispose)
       pure a
-    H.Receive _ a -> pure a
+    H.Receive b a -> do
+      traceM "Receive"
+      traceM b
+      H.gets _.io
+        >>= case _ of
+          Nothing -> pure a
+          Just io -> do
+            c <- H.liftAff $ (ioq1 io) (SetInput b.input a)
+            pure a
+    -- Just io -> H.liftAff $ unCoyoneda (\k q -> maybe' (const a) k <$> ioq io q) (SetInput b.input)
+
     H.Action output a -> do
-      traceM output
       H.raise output
       pure a
     H.Query query fail ->
       H.gets _.io
         >>= case _ of
           Nothing -> pure $ fail unit
-          Just io -> H.liftAff $ unCoyoneda (\k q -> maybe' fail k <$> ioq io q) query
+          Just io -> H.liftAff $ unCoyoneda (\k q -> maybe' fail k <$> ioq1 io q) (hoistCoyoneda toParentQuery query)
+
+      where 
+      toParentQuery :: forall x. query x -> Query input query x
+      toParentQuery q = Query2 q
+
+  -- Just io -> do
+  --   c <- H.liftAff $ (ioq1 io) (Query2 query (fail unit))
+  --   pure $ fail unit
 
   -- We don't need to render anything; this component is explicitly meant to be
   -- passed through.
@@ -261,3 +293,5 @@ component contextualize =
   ioq :: forall a. H.HalogenIO query output Aff -> query a -> Aff (Maybe a)
   ioq = _.query
 
+  ioq1 :: forall a. H.HalogenIO (Query input query) output Aff -> (Query input query) a -> Aff (Maybe a)
+  ioq1 = _.query
